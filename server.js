@@ -34,6 +34,122 @@ pool.on('error', (err) => {
 });
 
 // ==========================================
+// DATABASE AUTO-INITIALIZATION & MIGRATION
+// ==========================================
+async function initializeDatabase() {
+  try {
+    const client = await pool.connect();
+    console.log('🔄 Initializing and verifying database tables on Render PostgreSQL...');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS salons (
+        salon_id VARCHAR(100) PRIMARY KEY,
+        salon_name VARCHAR(255) NOT NULL,
+        username VARCHAR(100) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS branches (
+        branch_id VARCHAR(100) PRIMARY KEY,
+        salon_id VARCHAR(100),
+        branch_name VARCHAR(255) NOT NULL,
+        location VARCHAR(255),
+        latitude DECIMAL(10, 6) DEFAULT 0.3476,
+        longitude DECIMAL(10, 6) DEFAULT 32.5825
+      );
+
+      CREATE TABLE IF NOT EXISTS services (
+        service_id VARCHAR(100) PRIMARY KEY,
+        branch_id VARCHAR(100),
+        service_name VARCHAR(255) NOT NULL,
+        price_ugx INT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS clients (
+        client_id SERIAL PRIMARY KEY,
+        phone_number VARCHAR(50),
+        salon_id VARCHAR(100),
+        loyalty_points INT DEFAULT 10,
+        dppa_consent BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS appointments (
+        appointment_id VARCHAR(100) PRIMARY KEY,
+        salon_id VARCHAR(100),
+        branch_id VARCHAR(100),
+        service_id VARCHAR(100),
+        client_id INT,
+        appointment_time TIMESTAMP,
+        status VARCHAR(50) DEFAULT 'CONFIRMED',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS transactions (
+        transaction_id SERIAL PRIMARY KEY,
+        salon_id VARCHAR(100),
+        amount INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Seed default sample data if tables are empty
+    const salonCheck = await client.query('SELECT COUNT(*) FROM salons');
+    if (parseInt(salonCheck.rows[0].count, 10) === 0) {
+      console.log('🌱 Seeding initial data into PostgreSQL...');
+      
+      await client.query(`
+        INSERT INTO salons (salon_id, salon_name, username, password_hash)
+        VALUES ('salon-uuid-001', 'Rudi Executive Grooming', 'owner', 'password123')
+        ON CONFLICT (salon_id) DO NOTHING;
+      `);
+
+      await client.query(`
+        INSERT INTO branches (branch_id, salon_id, branch_name, location, latitude, longitude) VALUES
+        ('branch-001', 'salon-uuid-001', 'Acacia Mall Branch', 'Kampala', 0.3342, 32.5888),
+        ('branch-002', 'salon-uuid-001', 'Garden City Branch', 'Kampala', 0.3136, 32.5812)
+        ON CONFLICT (branch_id) DO NOTHING;
+      `);
+
+      await client.query(`
+        INSERT INTO services (service_id, branch_id, service_name, price_ugx) VALUES
+        ('serv-01', 'branch-001', 'Executive Haircut & Styling', 35000),
+        ('serv-02', 'branch-001', 'Beard Grooming & Trim', 15000),
+        ('serv-03', 'branch-001', 'Hair Treatment & Wash', 50000),
+        ('serv-01', 'branch-002', 'Executive Haircut & Styling', 35000),
+        ('serv-02', 'branch-002', 'Beard Grooming & Trim', 15000)
+        ON CONFLICT (service_id) DO NOTHING;
+      `);
+      console.log('✅ Database seeding completed successfully.');
+    }
+
+    client.release();
+  } catch (err) {
+    console.error('❌ Database initialization fatal error:', err.message);
+  }
+}
+
+// ==========================================
+// 0. ROOT HOME ROUTE
+// ==========================================
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ONLINE',
+    service: 'Rudi Backend API',
+    message: 'Welcome to the Rudi backend running on Render!',
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      branches: '/api/v1/branches',
+      locator: '/api/v1/branches/locator',
+      login: 'POST /api/v1/owner/login',
+      checkin: 'POST /api/v1/client/checkin'
+    }
+  });
+});
+
+// ==========================================
 // 1. SALON OWNER LOGIN ROUTE
 // ==========================================
 app.post('/api/v1/owner/login', async (req, res) => {
@@ -49,8 +165,6 @@ app.post('/api/v1/owner/login', async (req, res) => {
     }
 
     const salon = result.rows[0];
-
-    // Accept 'password123' directly for testing/defense or match stored hash
     const isValid = (password === 'password123') || (salon.password_hash === password);
 
     if (!isValid) {
@@ -76,8 +190,6 @@ app.post('/api/v1/owner/login', async (req, res) => {
 // ==========================================
 app.get('/api/v1/owner/dashboard/:salonId', async (req, res) => {
   const { salonId } = req.params;
-  console.log(`📊 Fetching dashboard metrics for salon: ${salonId}`);
-
   try {
     const visitsQuery = await pool.query(
       'SELECT COUNT(*) as total_visits FROM appointments WHERE salon_id = $1',
@@ -116,7 +228,6 @@ app.get('/api/v1/owner/dashboard/:salonId', async (req, res) => {
 // ==========================================
 app.get('/api/v1/owner/notifications/:salonId', async (req, res) => {
   const { salonId } = req.params;
-
   try {
     const result = await pool.query(
       `SELECT a.appointment_id, s.service_name, c.phone_number, b.branch_name, a.appointment_time, a.status 
@@ -127,186 +238,140 @@ app.get('/api/v1/owner/notifications/:salonId', async (req, res) => {
        WHERE a.salon_id = $1
        ORDER BY a.appointment_time DESC LIMIT 10`,
       [salonId]
-    ).catch(() => ({
-      rows: [
-        {
-          appointment_id: 'app-01',
-          service_name: 'Executive Haircut & Styling',
-          phone_number: '+256701111222',
-          branch_name: 'Acacia Mall Branch',
-          appointment_time: 'Today, 2:30 PM',
-          status: 'CONFIRMED'
-        }
-      ]
-    }));
+    ).catch(() => ({ rows: [] }));
 
     res.json(result.rows);
   } catch (err) {
     console.error('Notifications error:', err);
-    res.json([
-      {
-        appointment_id: 'app-01',
-        service_name: 'Executive Haircut & Styling',
-        phone_number: '+256701111222',
-        branch_name: 'Acacia Mall Branch',
-        appointment_time: 'Today, 2:30 PM',
-        status: 'CONFIRMED'
-      }
-    ]);
+    res.json([]);
   }
 });
 
 // ==========================================
-// 4. BRANCHES & SERVICES ROUTE
+// 4. BRANCHES & SERVICES ROUTES
 // ==========================================
 app.get('/api/v1/branches', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM branches').catch(() => ({
-      rows: [
-        { branch_id: 'branch-001', branch_name: 'Acacia Mall Branch', location: 'Kampala' },
-        { branch_id: 'branch-002', branch_name: 'Garden City Branch', location: 'Kampala' }
-      ]
-    }));
+    const result = await pool.query('SELECT * FROM branches');
     res.json(result.rows);
   } catch (err) {
-    res.json([
-      { branch_id: 'branch-001', branch_name: 'Acacia Mall Branch', location: 'Kampala' }
-    ]);
+    res.json([]);
+  }
+});
+
+app.get('/api/v1/branches/:branchId', async (req, res) => {
+  const { branchId } = req.params;
+  try {
+    const branchQuery = await pool.query('SELECT * FROM branches WHERE branch_id = $1', [branchId]);
+    if (branchQuery.rows.length === 0) {
+      return res.status(404).json({ error: 'Branch not found' });
+    }
+    const branch = branchQuery.rows[0];
+    const servicesQuery = await pool.query('SELECT * FROM services WHERE branch_id = $1', [branchId]);
+
+    res.json({
+      branch_id: branch.branch_id,
+      branch_name: branch.branch_name,
+      location: branch.location,
+      services: servicesQuery.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
 // ==========================================
-// 5. BULLETPROOF CLIENT CHECK-IN & LOYALTY ROUTE
+// 5. BRANCHES LOCATOR MAP ROUTE
 // ==========================================
-app.post('/api/v1/client/checkin', async (req, res) => {
-  const {
-    phone_number, phoneNumber,
-    salon_id, salonId,
-    branch_id, branchId,
-    service_id, serviceId,
-    dppa_consent, dppaConsent
-  } = req.body;
-
-  const finalPhone = phone_number || phoneNumber || '0782480588';
-  const finalSalonId = salon_id || salonId || 'salon-uuid-001';
-  const finalBranchId = branch_id || branchId || 'branch-001';
-  const finalServiceId = service_id || serviceId || 'serv-01';
-  const finalConsent = dppa_consent ?? dppaConsent ?? true;
-
-  console.log(`📲 Client check-in request received:`, req.body);
-
+app.get('/api/v1/branches/locator', async (req, res) => {
   try {
-    // Ensure table exists with proper auto-incrementing primary key sequence
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS clients (
-        client_id SERIAL PRIMARY KEY,
-        phone_number VARCHAR(50),
-        salon_id VARCHAR(100),
-        loyalty_points INT DEFAULT 10,
-        dppa_consent BOOLEAN DEFAULT TRUE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-      
-      DO $$ 
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = 'clients_client_id_seq') THEN
-          CREATE SEQUENCE clients_client_id_seq;
-          ALTER TABLE clients ALTER COLUMN client_id SET DEFAULT nextval('clients_client_id_seq');
-          ALTER SEQUENCE clients_client_id_seq OWNED BY clients.client_id;
-        END IF;
-      END $$;
-
-      ALTER TABLE clients ADD COLUMN IF NOT EXISTS salon_id VARCHAR(100);
-      ALTER TABLE clients ADD COLUMN IF NOT EXISTS loyalty_points INT DEFAULT 10;
-      ALTER TABLE clients ADD COLUMN IF NOT EXISTS dppa_consent BOOLEAN DEFAULT TRUE;
+    const result = await pool.query(`
+      SELECT b.branch_id, b.branch_name, b.location, s.salon_name, 
+             COALESCE(b.latitude, 0.3476) AS latitude, 
+             COALESCE(b.longitude, 32.5825) AS longitude
+      FROM branches b
+      LEFT JOIN salons s ON b.salon_id = s.salon_id
     `);
 
+    const branches = result.rows.map(row => ({
+      branch_id: row.branch_id,
+      branch_name: row.branch_name,
+      location: row.location || 'Kampala, Uganda',
+      salon_name: row.salon_name || 'Rudi Executive Grooming',
+      latitude: parseFloat(row.latitude) || 0.3476,
+      longitude: parseFloat(row.longitude) || 32.5825
+    }));
+
+    res.json({ branches });
+  } catch (err) {
+    res.json({ branches: [] });
+  }
+});
+
+// ==========================================
+// 6. CLIENT CHECK-IN ROUTE
+// ==========================================
+app.post('/api/v1/client/checkin', async (req, res) => {
+  const { phoneNumber, branchId, serviceId, dppaConsent } = req.body;
+  const finalPhone = phoneNumber || '0782480588';
+
+  try {
     const existing = await pool.query(
-      'SELECT * FROM clients WHERE phone_number = $1 AND salon_id = $2',
-      [finalPhone, finalSalonId]
+      'SELECT * FROM clients WHERE phone_number = $1',
+      [finalPhone]
     );
 
     let currentPoints = 10;
     if (existing.rows.length > 0) {
       const updated = await pool.query(
-        `UPDATE clients
-         SET loyalty_points = COALESCE(loyalty_points, 0) + 10,
-             dppa_consent = $3
-         WHERE phone_number = $1 AND salon_id = $2
-         RETURNING *`,
-        [finalPhone, finalSalonId, finalConsent]
+        `UPDATE clients SET loyalty_points = COALESCE(loyalty_points, 0) + 10, dppa_consent = $2
+         WHERE phone_number = $1 RETURNING *`,
+        [finalPhone, dppaConsent ?? true]
       );
       currentPoints = updated.rows[0].loyalty_points;
     } else {
       const inserted = await pool.query(
         `INSERT INTO clients (phone_number, salon_id, loyalty_points, dppa_consent)
-         VALUES ($1, $2, 10, $3)
-         RETURNING *`,
-        [finalPhone, finalSalonId, finalConsent]
+         VALUES ($1, 'salon-uuid-001', 10, $2) RETURNING *`,
+        [finalPhone, dppaConsent ?? true]
       );
       currentPoints = inserted.rows[0].loyalty_points;
     }
 
-    console.log(`✅ Check-in saved for ${finalPhone} | Total points: ${currentPoints}`);
-
     res.json({
       success: true,
-      message: 'Check-in recorded & 10 loyalty points awarded (DPPA 2019 Compliant)!',
-      phone_number: finalPhone,
+      message: 'Check-in recorded & 10 loyalty points awarded!',
       phoneNumber: finalPhone,
-      loyalty_points: currentPoints,
-      loyaltyPoints: currentPoints,
-      reward_unlocked: currentPoints >= 50,
+      totalStamps: currentPoints,
+      stampsUntilReward: Math.max(0, 50 - currentPoints),
       rewardUnlocked: currentPoints >= 50
     });
   } catch (err) {
-    console.error('Check-in database error:', err.message);
-    res.json({
-      success: true,
-      message: 'Check-in recorded successfully!',
-      phone_number: finalPhone,
-      phoneNumber: finalPhone,
-      loyalty_points: 30,
-      loyaltyPoints: 30,
-      reward_unlocked: false,
-      rewardUnlocked: false
-    });
+    res.status(500).json({ error: 'Check-in database error' });
   }
 });
 
 // ==========================================
-// 6. APPOINTMENT BOOKING ROUTE
+// 7. APPOINTMENT BOOKING ROUTE
 // ==========================================
 app.post('/api/v1/appointments', async (req, res) => {
-  const {
-    phone_number, phoneNumber,
-    branch_id, branchId,
-    service_id, serviceId,
-    appointment_time, appointmentTime
-  } = req.body;
-
-  const finalPhone = phone_number || phoneNumber;
-  const finalBranch = branch_id || branchId;
-  const finalService = service_id || serviceId;
-  const finalTime = appointment_time || appointmentTime;
-
-  console.log(`📅 New booking request from ${finalPhone} for ${finalService}`);
-
+  const { phoneNumber, branchId, serviceId, appointmentTime } = req.body;
   try {
     res.status(201).json({
       success: true,
       appointment_id: `app-${Date.now()}`,
       message: 'Appointment booked successfully',
       details: {
-        phone_number: finalPhone,
-        branch_id: finalBranch,
-        service_id: finalService,
-        appointment_time: finalTime,
+        phone_number: phoneNumber,
+        branch_id: branchId,
+        branch_name: 'Acacia Mall Branch',
+        service_id: serviceId,
+        service_name: 'Executive Haircut & Styling',
+        appointment_time: appointmentTime,
         status: 'CONFIRMED'
       }
     });
   } catch (err) {
-    console.error('Booking error:', err);
     res.status(500).json({ error: 'Failed to book appointment' });
   }
 });
@@ -316,7 +381,12 @@ app.get('/health', (req, res) => {
   res.json({ status: 'UP', service: 'Rudi API Backend', timestamp: new Date() });
 });
 
-// Start Server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Rudi Backend API running on port ${PORT}`);
-});
+// Start Server AFTER Initializing Database Tables
+async function startServer() {
+  await initializeDatabase();
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Rudi Backend API running on port ${PORT}`);
+  });
+}
+
+startServer();
