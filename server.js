@@ -116,7 +116,7 @@ async function initializeDatabase() {
       ON CONFLICT (salon_id) DO NOTHING;
     `);
 
-    // Seed 50 sister branches (mix of familiar Kampala areas & fictional names)
+    // Seed 50 sister branches (mix of familiar Kampala spots & fictional names)
     await client.query(`
       INSERT INTO branches (branch_id, salon_id, branch_name, location, latitude, longitude) VALUES
       ('branch-001', 'salon-uuid-001', 'Acacia Mall Branch', 'Kololo / Acacia, Kampala', 0.334200, 32.588800),
@@ -169,7 +169,11 @@ async function initializeDatabase() {
       ('branch-048', 'salon-uuid-001', 'Lungujja West Beauty Studio', 'Lungujja, Kampala', 0.311400, 32.536900),
       ('branch-049', 'salon-uuid-001', 'Nansana Highway Fade Bar', 'Nansana, Wakiso', 0.365200, 32.527800),
       ('branch-050', 'salon-uuid-001', 'Kawempe North Crown Parlour', 'Kawempe, Kampala', 0.363800, 32.559400)
-      ON CONFLICT (branch_id) DO NOTHING;
+      ON CONFLICT (branch_id) DO UPDATE SET
+        branch_name = EXCLUDED.branch_name,
+        location = EXCLUDED.location,
+        latitude = EXCLUDED.latitude,
+        longitude = EXCLUDED.longitude;
     `);
 
     // Seed default services if empty
@@ -216,6 +220,7 @@ app.get('/', (req, res) => {
       '/api/v1/branches/nearby',
       '/api/v1/services',
       '/api/v1/appointments',
+      '/api/v1/transactions',
       '/api/v1/owner/login',
     ],
   });
@@ -257,18 +262,23 @@ app.post('/api/v1/owner/login', async (req, res) => {
   }
 });
 
-// All Branches
+// All Branches (returns raw JSON array for Flutter api_service.dart)
 app.get('/api/v1/branches', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM branches ORDER BY branch_id ASC');
-    res.json({ branches: result.rows, data: result.rows });
+    const formatted = result.rows.map((b) => ({
+      ...b,
+      latitude: Number(b.latitude),
+      longitude: Number(b.longitude),
+    }));
+    res.json(formatted);
   } catch (err) {
     console.error('Error fetching branches:', err);
     res.status(500).json({ error: 'Failed to fetch branches' });
   }
 });
 
-// Nearby Branches (?lat=...&lng=...&limit=10)
+// Nearby Branches (?lat=...&lng=...&limit=15)
 app.get('/api/v1/branches/nearby', async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
@@ -276,7 +286,11 @@ app.get('/api/v1/branches/nearby', async (req, res) => {
 
   try {
     const result = await pool.query('SELECT * FROM branches ORDER BY branch_id ASC');
-    let branches = result.rows;
+    let branches = result.rows.map((b) => ({
+      ...b,
+      latitude: Number(b.latitude),
+      longitude: Number(b.longitude),
+    }));
 
     if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
       branches = branches
@@ -287,7 +301,7 @@ app.get('/api/v1/branches/nearby', async (req, res) => {
         .sort((a, b) => a.distance_km - b.distance_km);
     }
 
-    res.json({ branches: branches.slice(0, limit), data: branches.slice(0, limit) });
+    res.json(branches.slice(0, limit));
   } catch (err) {
     console.error('Error fetching nearby branches:', err);
     res.status(500).json({ error: 'Failed to fetch nearby branches' });
@@ -301,7 +315,7 @@ app.get('/api/v1/services', async (req, res) => {
     const result = branch_id
       ? await pool.query('SELECT * FROM services WHERE branch_id = $1 ORDER BY service_id ASC', [branch_id])
       : await pool.query('SELECT * FROM services ORDER BY service_id ASC');
-    res.json({ services: result.rows, data: result.rows });
+    res.json(result.rows);
   } catch (err) {
     console.error('Error fetching services:', err);
     res.status(500).json({ error: 'Failed to fetch services' });
@@ -312,7 +326,7 @@ app.get('/api/v1/services', async (req, res) => {
 app.get('/api/v1/appointments', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM appointments ORDER BY created_at DESC');
-    res.json({ appointments: result.rows, data: result.rows });
+    res.json(result.rows);
   } catch (err) {
     console.error('Error fetching appointments:', err);
     res.status(500).json({ error: 'Failed to fetch appointments' });
@@ -352,7 +366,7 @@ app.post('/api/v1/appointments', async (req, res) => {
         appointment_time,
       ]
     );
-    res.status(201).json({ appointment: result.rows[0], data: result.rows[0] });
+    res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Error creating appointment:', err);
     res.status(500).json({ error: 'Failed to create appointment' });
@@ -363,7 +377,7 @@ app.post('/api/v1/appointments', async (req, res) => {
 app.get('/api/v1/transactions', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM transactions ORDER BY created_at DESC');
-    res.json({ transactions: result.rows, data: result.rows });
+    res.json(result.rows);
   } catch (err) {
     console.error('Error fetching transactions:', err);
     res.status(500).json({ error: 'Failed to fetch transactions' });
@@ -385,7 +399,7 @@ app.post('/api/v1/transactions', async (req, res) => {
        RETURNING *`,
       [transactionId, branch_id, client_name, service_name, Number(amount_ugx), payment_method || 'cash']
     );
-    res.status(201).json({ transaction: result.rows[0], data: result.rows[0] });
+    res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Error creating transaction:', err);
     res.status(500).json({ error: 'Failed to record transaction' });
