@@ -5,388 +5,401 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL Connection Pool (Supports local development & Render cloud deployment)
-const pool = new Pool(
-  process.env.DATABASE_URL
-    ? {
-        connectionString: process.env.DATABASE_URL,
-        ssl: { rejectUnauthorized: false }, // Required for Render PostgreSQL
-      }
-    : {
-        user: 'postgres',
-        host: 'localhost',
-        database: 'rudi_db',
-        password: 'Sean1s.k',
-        port: 5432,
-      }
-);
-
-pool.on('connect', () => {
-  console.log('📦 Connected to PostgreSQL database successfully.');
+// PostgreSQL connection pool (supports Render / DATABASE_URL and SSL)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL
+    ? { rejectUnauthorized: false }
+    : false,
 });
 
-pool.on('error', (err) => {
-  console.error('Unexpected database error on idle client', err);
-});
+// Helper to compute distance in km (Haversine formula)
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
-// ==========================================
-// DATABASE AUTO-INITIALIZATION & MIGRATION
-// ==========================================
+// Initialize tables and seed data strictly before listening
 async function initializeDatabase() {
+  const client = await pool.connect();
   try {
-    const client = await pool.connect();
-    console.log('🔄 Initializing and verifying database tables on Render PostgreSQL...');
+    await client.query('BEGIN');
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS salons (
-        salon_id VARCHAR(100) PRIMARY KEY,
-        salon_name VARCHAR(255) NOT NULL,
-        username VARCHAR(100) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS branches (
-        branch_id VARCHAR(100) PRIMARY KEY,
-        salon_id VARCHAR(100),
-        branch_name VARCHAR(255) NOT NULL,
-        location VARCHAR(255),
-        latitude DECIMAL(10, 6) DEFAULT 0.3476,
-        longitude DECIMAL(10, 6) DEFAULT 32.5825
-      );
-
-      CREATE TABLE IF NOT EXISTS services (
-        service_id VARCHAR(100) PRIMARY KEY,
-        branch_id VARCHAR(100),
-        service_name VARCHAR(255) NOT NULL,
-        price_ugx INT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS clients (
-        client_id SERIAL PRIMARY KEY,
-        phone_number VARCHAR(50),
-        salon_id VARCHAR(100),
-        loyalty_points INT DEFAULT 10,
-        dppa_consent BOOLEAN DEFAULT TRUE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS appointments (
-        appointment_id VARCHAR(100) PRIMARY KEY,
-        salon_id VARCHAR(100),
-        branch_id VARCHAR(100),
-        service_id VARCHAR(100),
-        client_id INT,
-        appointment_time TIMESTAMP,
-        status VARCHAR(50) DEFAULT 'CONFIRMED',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS transactions (
-        transaction_id SERIAL PRIMARY KEY,
-        salon_id VARCHAR(100),
-        amount INT NOT NULL,
+        salon_id TEXT PRIMARY KEY,
+        salon_name TEXT NOT NULL,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    // Seed default sample data if tables are empty
-    const salonCheck = await client.query('SELECT COUNT(*) FROM salons');
-    if (parseInt(salonCheck.rows[0].count, 10) === 0) {
-      console.log('🌱 Seeding initial data into PostgreSQL...');
-      
-      await client.query(`
-        INSERT INTO salons (salon_id, salon_name, username, password_hash)
-        VALUES ('salon-uuid-001', 'Rudi Executive Grooming', 'owner', 'password123')
-        ON CONFLICT (salon_id) DO NOTHING;
-      `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS branches (
+        branch_id TEXT PRIMARY KEY,
+        salon_id TEXT NOT NULL REFERENCES salons(salon_id) ON DELETE CASCADE,
+        branch_name TEXT NOT NULL,
+        location TEXT NOT NULL,
+        latitude DOUBLE PRECISION NOT NULL,
+        longitude DOUBLE PRECISION NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
-      await client.query(`
-        INSERT INTO branches (branch_id, salon_id, branch_name, location, latitude, longitude) VALUES
-        ('branch-001', 'salon-uuid-001', 'Acacia Mall Branch', 'Kampala', 0.3342, 32.5888),
-        ('branch-002', 'salon-uuid-001', 'Garden City Branch', 'Kampala', 0.3136, 32.5812)
-        ON CONFLICT (branch_id) DO NOTHING;
-      `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS services (
+        service_id TEXT PRIMARY KEY,
+        branch_id TEXT NOT NULL REFERENCES branches(branch_id) ON DELETE CASCADE,
+        service_name TEXT NOT NULL,
+        price_ugx INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS clients (
+        client_id TEXT PRIMARY KEY,
+        full_name TEXT NOT NULL,
+        phone TEXT UNIQUE NOT NULL,
+        email TEXT,
+        loyalty_points INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS appointments (
+        appointment_id TEXT PRIMARY KEY,
+        client_id TEXT REFERENCES clients(client_id) ON DELETE SET NULL,
+        client_name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        branch_id TEXT NOT NULL REFERENCES branches(branch_id) ON DELETE CASCADE,
+        service_id TEXT REFERENCES services(service_id) ON DELETE SET NULL,
+        service_name TEXT NOT NULL,
+        appointment_date TEXT NOT NULL,
+        appointment_time TEXT NOT NULL,
+        status TEXT DEFAULT 'confirmed',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS transactions (
+        transaction_id TEXT PRIMARY KEY,
+        branch_id TEXT NOT NULL REFERENCES branches(branch_id) ON DELETE CASCADE,
+        client_name TEXT NOT NULL,
+        service_name TEXT NOT NULL,
+        amount_ugx INTEGER NOT NULL,
+        payment_method TEXT DEFAULT 'cash',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Default salon owner credentials
+    await client.query(`
+      INSERT INTO salons (salon_id, salon_name, username, password_hash)
+      VALUES ('salon-uuid-001', 'Rudi Executive Grooming', 'owner', 'password123')
+      ON CONFLICT (salon_id) DO NOTHING;
+    `);
+
+    // Seed 50 sister branches (mix of familiar Kampala areas & fictional names)
+    await client.query(`
+      INSERT INTO branches (branch_id, salon_id, branch_name, location, latitude, longitude) VALUES
+      ('branch-001', 'salon-uuid-001', 'Acacia Mall Branch', 'Kololo / Acacia, Kampala', 0.334200, 32.588800),
+      ('branch-002', 'salon-uuid-001', 'Garden City Branch', 'Yusuf Lule Rd, Kampala', 0.313600, 32.581200),
+      ('branch-003', 'salon-uuid-001', 'Oasis Mall Executive Lounge', 'Kampala Rd, Kampala', 0.315400, 32.583100),
+      ('branch-004', 'salon-uuid-001', 'Forest Mall Grooming Studio', 'Lugogo, Kampala', 0.328900, 32.601400),
+      ('branch-005', 'salon-uuid-001', 'Village Mall Beauty & Barber', 'Bugolobi, Kampala', 0.317800, 32.615200),
+      ('branch-006', 'salon-uuid-001', 'Metroplex Salon & Spa', 'Naalya, Kampala', 0.372500, 32.634800),
+      ('branch-007', 'salon-uuid-001', 'Freedom City Styling Hub', 'Entebbe Rd, Kampala', 0.284500, 32.553900),
+      ('branch-008', 'salon-uuid-001', 'Africana Executive Cuts', 'Wampewo Ave, Kampala', 0.322800, 32.589500),
+      ('branch-009', 'salon-uuid-001', 'Sheraton Wellness & Grooming', 'Ternan Ave, Kampala', 0.319200, 32.586700),
+      ('branch-010', 'salon-uuid-001', 'Serena Crown Salon', 'Kintu Rd, Kampala', 0.318100, 32.581900),
+      ('branch-011', 'salon-uuid-001', 'Velvet Crown Parlour', 'Nakasero, Kampala', 0.326400, 32.578200),
+      ('branch-012', 'salon-uuid-001', 'Golden Scissors Lounge', 'Ntinda, Kampala', 0.351800, 32.613500),
+      ('branch-013', 'salon-uuid-001', 'Kireka Prime Fade Bar', 'Kireka, Kampala', 0.347900, 32.652100),
+      ('branch-014', 'salon-uuid-001', 'Banda Royal Hair Studio', 'Banda, Kampala', 0.336700, 32.631900),
+      ('branch-015', 'salon-uuid-001', 'Kabalagala Glam & Trim', 'Kabalagala, Kampala', 0.304200, 32.602800),
+      ('branch-016', 'salon-uuid-001', 'Muyenga Hill Luxury Salon', 'Muyenga, Kampala', 0.295600, 32.616400),
+      ('branch-017', 'salon-uuid-001', 'Kansanga Campus Cuts', 'Kansanga, Kampala', 0.291800, 32.605100),
+      ('branch-018', 'salon-uuid-001', 'Makindye Crest Grooming', 'Makindye, Kampala', 0.279400, 32.587300),
+      ('branch-019', 'salon-uuid-001', 'Nsambya Classic Barber', 'Nsambya, Kampala', 0.298700, 32.589100),
+      ('branch-020', 'salon-uuid-001', 'Kibuli Heritage Salon', 'Kibuli, Kampala', 0.305900, 32.594600),
+      ('branch-021', 'salon-uuid-001', 'Mengo Royal Crown Studio', 'Mengo, Kampala', 0.306800, 32.564200),
+      ('branch-022', 'salon-uuid-001', 'Rubaga Summit Beauty Bar', 'Rubaga, Kampala', 0.309500, 32.551800),
+      ('branch-023', 'salon-uuid-001', 'Nateete Hub Clippers', 'Nateete, Kampala', 0.298100, 32.528400),
+      ('branch-024', 'salon-uuid-001', 'Kasubi Tombs View Salon', 'Kasubi, Kampala', 0.331200, 32.554900),
+      ('branch-025', 'salon-uuid-001', 'Makerere Hill Sharp Cuts', 'Makerere, Kampala', 0.333500, 32.568300),
+      ('branch-026', 'salon-uuid-001', 'Wandegeya Express Grooming', 'Wandegeya, Kampala', 0.331800, 32.573600),
+      ('branch-027', 'salon-uuid-001', 'Mulago Ridge Hair Lounge', 'Mulago, Kampala', 0.338900, 32.576100),
+      ('branch-028', 'salon-uuid-001', 'Kamwokya Modern Fade House', 'Kamwokya, Kampala', 0.341500, 32.587400),
+      ('branch-029', 'salon-uuid-001', 'Bukoto Street Styling Loft', 'Bukoto, Kampala', 0.346200, 32.596800),
+      ('branch-030', 'salon-uuid-001', 'Kisaasi Green Beauty Hub', 'Kisaasi, Kampala', 0.375400, 32.604200),
+      ('branch-031', 'salon-uuid-001', 'Kyanja Oasis Grooming', 'Kyanja, Kampala', 0.384900, 32.608700),
+      ('branch-032', 'salon-uuid-001', 'Komamboga Crest Salon', 'Komamboga, Kampala', 0.391200, 32.617300),
+      ('branch-033', 'salon-uuid-001', 'Bweyogerere Junction Cuts', 'Bweyogerere, Wakiso', 0.354100, 32.664800),
+      ('branch-034', 'salon-uuid-001', 'Namugongo Shrine View Salon', 'Namugongo, Wakiso', 0.388600, 32.659200),
+      ('branch-035', 'salon-uuid-001', 'Kiira Town Elegance Studio', 'Kiira, Wakiso', 0.392800, 32.638500),
+      ('branch-036', 'salon-uuid-001', 'Kira Road Silk & Fade', 'Kira Rd, Kampala', 0.335600, 32.582400),
+      ('branch-037', 'salon-uuid-001', 'Jinja Road Executive Parlour', 'Jinja Rd, Kampala', 0.321900, 32.594100),
+      ('branch-038', 'salon-uuid-001', 'Nakasero Heights Lounge', 'Hill Ln, Kampala', 0.324700, 32.584600),
+      ('branch-039', 'salon-uuid-001', 'Kololo Terrace Beauty Bar', 'Akii Bua Rd, Kampala', 0.331900, 32.593200),
+      ('branch-040', 'salon-uuid-001', 'Naguru Summit Grooming Club', 'Naguru, Kampala', 0.336400, 32.606800),
+      ('branch-041', 'salon-uuid-001', 'Luzira Port Bell Hair Studio', 'Luzira, Kampala', 0.303400, 32.643700),
+      ('branch-042', 'salon-uuid-001', 'Mutungo Hill Crown Salon', 'Mutungo, Kampala', 0.312700, 32.636200),
+      ('branch-043', 'salon-uuid-001', 'Kitintale Link Barber Lounge', 'Kitintale, Kampala', 0.314900, 32.625800),
+      ('branch-044', 'salon-uuid-001', 'Namuwongo Park Styling Hub', 'Namuwongo, Kampala', 0.301500, 32.607900),
+      ('branch-045', 'salon-uuid-001', 'Gaba Beachfront Grooming', 'Gaba, Kampala', 0.268900, 32.637100),
+      ('branch-046', 'salon-uuid-001', 'Munyonyo Lakeview Salon', 'Munyonyo, Kampala', 0.246200, 32.614500),
+      ('branch-047', 'salon-uuid-001', 'Salaama Road Trend Cuts', 'Salaama Rd, Kampala', 0.281600, 32.573400),
+      ('branch-048', 'salon-uuid-001', 'Lungujja West Beauty Studio', 'Lungujja, Kampala', 0.311400, 32.536900),
+      ('branch-049', 'salon-uuid-001', 'Nansana Highway Fade Bar', 'Nansana, Wakiso', 0.365200, 32.527800),
+      ('branch-050', 'salon-uuid-001', 'Kawempe North Crown Parlour', 'Kawempe, Kampala', 0.363800, 32.559400)
+      ON CONFLICT (branch_id) DO NOTHING;
+    `);
+
+    // Seed default services if empty
+    const serviceCheck = await client.query('SELECT COUNT(*) FROM services');
+    if (parseInt(serviceCheck.rows[0].count, 10) === 0) {
       await client.query(`
         INSERT INTO services (service_id, branch_id, service_name, price_ugx) VALUES
         ('serv-01', 'branch-001', 'Executive Haircut & Styling', 35000),
         ('serv-02', 'branch-001', 'Beard Grooming & Trim', 15000),
         ('serv-03', 'branch-001', 'Hair Treatment & Wash', 50000),
-        ('serv-01', 'branch-002', 'Executive Haircut & Styling', 35000),
-        ('serv-02', 'branch-002', 'Beard Grooming & Trim', 15000)
+        ('serv-04', 'branch-002', 'Executive Haircut & Styling', 35000),
+        ('serv-05', 'branch-002', 'Beard Grooming & Trim', 15000)
         ON CONFLICT (service_id) DO NOTHING;
       `);
-      console.log('✅ Database seeding completed successfully.');
     }
 
-    client.release();
-  } catch (err) {
-    console.error('❌ Database initialization fatal error:', err.message);
-  }
-}
-
-// ==========================================
-// 0. ROOT HOME ROUTE
-// ==========================================
-app.get('/', (req, res) => {
-  res.json({
-    status: 'ONLINE',
-    service: 'Rudi Backend API',
-    message: 'Welcome to the Rudi backend running on Render!',
-    version: '1.0.0',
-    endpoints: {
-      health: '/health',
-      branches: '/api/v1/branches',
-      locator: '/api/v1/branches/locator',
-      login: 'POST /api/v1/owner/login',
-      checkin: 'POST /api/v1/client/checkin'
-    }
-  });
-});
-
-// ==========================================
-// 1. SALON OWNER LOGIN ROUTE
-// ==========================================
-app.post('/api/v1/owner/login', async (req, res) => {
-  const { username, password } = req.body;
-  console.log(`🔑 Login attempt received for username: ${username}`);
-
-  try {
-    const result = await pool.query('SELECT * FROM salons WHERE username = $1', [username]);
-
-    if (result.rows.length === 0) {
-      console.log('❌ Owner not found in database');
-      return res.status(401).json({ error: 'Invalid credentials: User not found' });
-    }
-
-    const salon = result.rows[0];
-    const isValid = (password === 'password123') || (salon.password_hash === password);
-
-    if (!isValid) {
-      console.log('❌ Password mismatch');
-      return res.status(401).json({ error: 'Invalid credentials: Password incorrect' });
-    }
-
-    console.log(`✅ Successful login for salon: ${salon.salon_name} (${salon.salon_id})`);
-    res.json({
-      success: true,
-      token: 'mock-jwt-token-rudi-2026',
-      salonId: salon.salon_id,
-      salonName: salon.salon_name
-    });
-  } catch (err) {
-    console.error('Server login error:', err);
-    res.status(500).json({ error: 'Server error during login' });
-  }
-});
-
-// ==========================================
-// 2. EXECUTIVE DASHBOARD METRICS ROUTE
-// ==========================================
-app.get('/api/v1/owner/dashboard/:salonId', async (req, res) => {
-  const { salonId } = req.params;
-  try {
-    const visitsQuery = await pool.query(
-      'SELECT COUNT(*) as total_visits FROM appointments WHERE salon_id = $1',
-      [salonId]
-    ).catch(() => ({ rows: [{ total_visits: 142 }] }));
-
-    const clientsQuery = await pool.query(
-      'SELECT COUNT(DISTINCT phone_number) as unique_clients FROM clients WHERE salon_id = $1',
-      [salonId]
-    ).catch(() => ({ rows: [{ unique_clients: 89 }] }));
-
-    const revenueQuery = await pool.query(
-      'SELECT SUM(amount) as total_revenue FROM transactions WHERE salon_id = $1',
-      [salonId]
-    ).catch(() => ({ rows: [{ total_revenue: 1250000 }] }));
-
-    res.json({
-      total_visits: parseInt(visitsQuery.rows[0].total_visits || 142, 10),
-      unique_clients: parseInt(clientsQuery.rows[0].unique_clients || 89, 10),
-      total_revenue_ugx: parseInt(revenueQuery.rows[0].total_revenue || 1250000, 10),
-      subscription_status: 'ACTIVE'
-    });
-  } catch (err) {
-    console.error('Dashboard metrics error:', err);
-    res.json({
-      total_visits: 142,
-      unique_clients: 89,
-      total_revenue_ugx: 1250000,
-      subscription_status: 'ACTIVE'
-    });
-  }
-});
-
-// ==========================================
-// 3. LIVE OWNER NOTIFICATIONS ROUTE
-// ==========================================
-app.get('/api/v1/owner/notifications/:salonId', async (req, res) => {
-  const { salonId } = req.params;
-  try {
-    const result = await pool.query(
-      `SELECT a.appointment_id, s.service_name, c.phone_number, b.branch_name, a.appointment_time, a.status 
-       FROM appointments a
-       JOIN services s ON a.service_id = s.service_id
-       JOIN clients c ON a.client_id = c.client_id
-       JOIN branches b ON a.branch_id = b.branch_id
-       WHERE a.salon_id = $1
-       ORDER BY a.appointment_time DESC LIMIT 10`,
-      [salonId]
-    ).catch(() => ({ rows: [] }));
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Notifications error:', err);
-    res.json([]);
-  }
-});
-
-// ==========================================
-// 4. BRANCHES & SERVICES ROUTES
-// ==========================================
-app.get('/api/v1/branches', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM branches');
-    res.json(result.rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/v1/branches/:branchId', async (req, res) => {
-  const { branchId } = req.params;
-  try {
-    const branchQuery = await pool.query('SELECT * FROM branches WHERE branch_id = $1', [branchId]);
-    if (branchQuery.rows.length === 0) {
-      return res.status(404).json({ error: 'Branch not found' });
-    }
-    const branch = branchQuery.rows[0];
-    const servicesQuery = await pool.query('SELECT * FROM services WHERE branch_id = $1', [branchId]);
-
-    res.json({
-      branch_id: branch.branch_id,
-      branch_name: branch.branch_name,
-      location: branch.location,
-      services: servicesQuery.rows
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ==========================================
-// 5. BRANCHES LOCATOR MAP ROUTE
-// ==========================================
-app.get('/api/v1/branches/locator', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT b.branch_id, b.branch_name, b.location, s.salon_name, 
-             COALESCE(b.latitude, 0.3476) AS latitude, 
-             COALESCE(b.longitude, 32.5825) AS longitude
-      FROM branches b
-      LEFT JOIN salons s ON b.salon_id = s.salon_id
+    // Seed sample client if empty
+    await client.query(`
+      INSERT INTO clients (client_id, full_name, phone, email, loyalty_points)
+      VALUES ('client-001', 'Alex Mukasa', '+256700000000', 'alex@example.com', 120)
+      ON CONFLICT (client_id) DO NOTHING;
     `);
 
-    const branches = result.rows.map(row => ({
-      branch_id: row.branch_id,
-      branch_name: row.branch_name,
-      location: row.location || 'Kampala, Uganda',
-      salon_name: row.salon_name || 'Rudi Executive Grooming',
-      latitude: parseFloat(row.latitude) || 0.3476,
-      longitude: parseFloat(row.longitude) || 32.5825
-    }));
-
-    res.json({ branches });
+    await client.query('COMMIT');
+    console.log('Database initialized and seeded successfully.');
   } catch (err) {
-    res.json({ branches: [] });
+    await client.query('ROLLBACK');
+    console.error('Database initialization error:', err);
+    throw err;
+  } finally {
+    client.release();
   }
-});
-
-// ==========================================
-// 6. CLIENT CHECK-IN ROUTE
-// ==========================================
-app.post('/api/v1/client/checkin', async (req, res) => {
-  const { phoneNumber, branchId, serviceId, dppaConsent } = req.body;
-  const finalPhone = phoneNumber || '0782480588';
-
-  try {
-    const existing = await pool.query(
-      'SELECT * FROM clients WHERE phone_number = $1',
-      [finalPhone]
-    );
-
-    let currentPoints = 10;
-    if (existing.rows.length > 0) {
-      const updated = await pool.query(
-        `UPDATE clients SET loyalty_points = COALESCE(loyalty_points, 0) + 10, dppa_consent = $2
-         WHERE phone_number = $1 RETURNING *`,
-        [finalPhone, dppaConsent ?? true]
-      );
-      currentPoints = updated.rows[0].loyalty_points;
-    } else {
-      const inserted = await pool.query(
-        `INSERT INTO clients (phone_number, salon_id, loyalty_points, dppa_consent)
-         VALUES ($1, 'salon-uuid-001', 10, $2) RETURNING *`,
-        [finalPhone, dppaConsent ?? true]
-      );
-      currentPoints = inserted.rows[0].loyalty_points;
-    }
-
-    res.json({
-      success: true,
-      message: 'Check-in recorded & 10 loyalty points awarded!',
-      phoneNumber: finalPhone,
-      totalStamps: currentPoints,
-      stampsUntilReward: Math.max(0, 50 - currentPoints),
-      rewardUnlocked: currentPoints >= 50
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Check-in database error' });
-  }
-});
-
-// ==========================================
-// 7. APPOINTMENT BOOKING ROUTE
-// ==========================================
-app.post('/api/v1/appointments', async (req, res) => {
-  const { phoneNumber, branchId, serviceId, appointmentTime } = req.body;
-  try {
-    res.status(201).json({
-      success: true,
-      appointment_id: `app-${Date.now()}`,
-      message: 'Appointment booked successfully',
-      details: {
-        phone_number: phoneNumber,
-        branch_id: branchId,
-        branch_name: 'Acacia Mall Branch',
-        service_id: serviceId,
-        service_name: 'Executive Haircut & Styling',
-        appointment_time: appointmentTime,
-        status: 'CONFIRMED'
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to book appointment' });
-  }
-});
-
-// Health Check Endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'UP', service: 'Rudi API Backend', timestamp: new Date() });
-});
-
-// Start Server AFTER Initializing Database Tables
-async function startServer() {
-  await initializeDatabase();
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Rudi Backend API running on port ${PORT}`);
-  });
 }
 
-startServer();
+// Root & Health Routes
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'Rudi Salon Backend API',
+    version: '1.0.0',
+    endpoints: [
+      '/health',
+      '/api/v1/branches',
+      '/api/v1/branches/nearby',
+      '/api/v1/services',
+      '/api/v1/appointments',
+      '/api/v1/owner/login',
+    ],
+  });
+});
+
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'ok', database: 'connected' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', database: 'disconnected', error: err.message });
+  }
+});
+
+// Owner Login
+app.post('/api/v1/owner/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT salon_id, salon_name, username FROM salons WHERE username = $1 AND password_hash = $2',
+      [username, password]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    return res.json({
+      success: true,
+      salon: result.rows[0],
+    });
+  } catch (err) {
+    console.error('Login error:', err);
+    return res.status(500).json({ error: 'Server error during login' });
+  }
+});
+
+// All Branches
+app.get('/api/v1/branches', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM branches ORDER BY branch_id ASC');
+    res.json({ branches: result.rows, data: result.rows });
+  } catch (err) {
+    console.error('Error fetching branches:', err);
+    res.status(500).json({ error: 'Failed to fetch branches' });
+  }
+});
+
+// Nearby Branches (?lat=...&lng=...&limit=10)
+app.get('/api/v1/branches/nearby', async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const limit = parseInt(req.query.limit || '15', 10);
+
+  try {
+    const result = await pool.query('SELECT * FROM branches ORDER BY branch_id ASC');
+    let branches = result.rows;
+
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+      branches = branches
+        .map((b) => ({
+          ...b,
+          distance_km: Number(haversineKm(lat, lng, b.latitude, b.longitude).toFixed(2)),
+        }))
+        .sort((a, b) => a.distance_km - b.distance_km);
+    }
+
+    res.json({ branches: branches.slice(0, limit), data: branches.slice(0, limit) });
+  } catch (err) {
+    console.error('Error fetching nearby branches:', err);
+    res.status(500).json({ error: 'Failed to fetch nearby branches' });
+  }
+});
+
+// Services (optional ?branch_id=...)
+app.get('/api/v1/services', async (req, res) => {
+  const { branch_id } = req.query;
+  try {
+    const result = branch_id
+      ? await pool.query('SELECT * FROM services WHERE branch_id = $1 ORDER BY service_id ASC', [branch_id])
+      : await pool.query('SELECT * FROM services ORDER BY service_id ASC');
+    res.json({ services: result.rows, data: result.rows });
+  } catch (err) {
+    console.error('Error fetching services:', err);
+    res.status(500).json({ error: 'Failed to fetch services' });
+  }
+});
+
+// Appointments List & Create
+app.get('/api/v1/appointments', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM appointments ORDER BY created_at DESC');
+    res.json({ appointments: result.rows, data: result.rows });
+  } catch (err) {
+    console.error('Error fetching appointments:', err);
+    res.status(500).json({ error: 'Failed to fetch appointments' });
+  }
+});
+
+app.post('/api/v1/appointments', async (req, res) => {
+  const {
+    client_name,
+    phone,
+    branch_id,
+    service_id,
+    service_name,
+    appointment_date,
+    appointment_time,
+  } = req.body || {};
+
+  if (!client_name || !phone || !branch_id || !service_name || !appointment_date || !appointment_time) {
+    return res.status(400).json({ error: 'Missing required appointment fields' });
+  }
+
+  const appointmentId = `appt-${Date.now()}`;
+  try {
+    const result = await pool.query(
+      `INSERT INTO appointments
+        (appointment_id, client_name, phone, branch_id, service_id, service_name, appointment_date, appointment_time, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'confirmed')
+       RETURNING *`,
+      [
+        appointmentId,
+        client_name,
+        phone,
+        branch_id,
+        service_id || null,
+        service_name,
+        appointment_date,
+        appointment_time,
+      ]
+    );
+    res.status(201).json({ appointment: result.rows[0], data: result.rows[0] });
+  } catch (err) {
+    console.error('Error creating appointment:', err);
+    res.status(500).json({ error: 'Failed to create appointment' });
+  }
+});
+
+// Transactions List & Create
+app.get('/api/v1/transactions', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM transactions ORDER BY created_at DESC');
+    res.json({ transactions: result.rows, data: result.rows });
+  } catch (err) {
+    console.error('Error fetching transactions:', err);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+app.post('/api/v1/transactions', async (req, res) => {
+  const { branch_id, client_name, service_name, amount_ugx, payment_method } = req.body || {};
+  if (!branch_id || !client_name || !service_name || amount_ugx === undefined) {
+    return res.status(400).json({ error: 'Missing required transaction fields' });
+  }
+
+  const transactionId = `txn-${Date.now()}`;
+  try {
+    const result = await pool.query(
+      `INSERT INTO transactions
+        (transaction_id, branch_id, client_name, service_name, amount_ugx, payment_method)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [transactionId, branch_id, client_name, service_name, Number(amount_ugx), payment_method || 'cash']
+    );
+    res.status(201).json({ transaction: result.rows[0], data: result.rows[0] });
+  } catch (err) {
+    console.error('Error creating transaction:', err);
+    res.status(500).json({ error: 'Failed to record transaction' });
+  }
+});
+
+// Start server only after DB tables & seeds are ready
+initializeDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Rudi backend running on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to start server due to DB init error:', err);
+    process.exit(1);
+  });
