@@ -70,6 +70,8 @@ async function initializeDatabase() {
       );
     `);
 
+    await client.query(`DROP TABLE IF EXISTS clients CASCADE;`);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS clients (
         client_id TEXT PRIMARY KEY,
@@ -190,7 +192,7 @@ async function initializeDatabase() {
       `);
     }
 
-    // Seed sample client if empty
+    // Seed sample client
     await client.query(`
       INSERT INTO clients (client_id, full_name, phone, email, loyalty_points)
       VALUES ('client-001', 'Alex Mukasa', '+256700000000', 'alex@example.com', 120)
